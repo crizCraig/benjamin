@@ -1,75 +1,197 @@
 # -*- coding: utf-8 -*-
 
 import boto3
-import psycopg2
+import csv
+import json
+import pprint
 
-client = boto3.client('ec2', 'us-east-1')
-ec2 = boto3.resource('ec2', 'us-east-1')
-
-ACCOUNT_TYPE_VPC_DEFAULT = 'VPC-default'
-ACCOUNT_TYPE_EC2_CLASSIC = 'EC2-classic'
+from helpers import *
 
 # Account type matters only slightly for reserved instances in that
 # capacity is not guaranteed in your VPC if you have a classic RI that applies
 # and visa-versa.
 
 
+# TODO: Search for All-upfront amazing deals - like one cent, or one dollar and buy those.
+
 def go():
+    client = boto3.client('ec2', 'us-east-1')
+    ec2 = boto3.resource('ec2', 'us-east-1')
+
     print('determining account type...')
-    account_type = determine_account_type()
-    print('done determining account type')
+    account_type = determine_account_type(client)
 
     print('getting my reserved instances...')
-    reservations = get_ris()
-    print('done getting my reserved instances...')
+    reservations = get_ris(client)
 
     print('getting running instances...')
-    instances, instance_class_counts = get_instances(account_type)
-    print('done getting running instances')
+    instances, instance_class_counts = get_instances(account_type, client, ec2)
 
     print('getting recommendations...')
-    make_recommendations(reservations, instances, instance_class_counts)
+    make_recommendations(reservations, instances, instance_class_counts, client,
+                         ec2, account_type)
 
 
-def make_recommendations(reservations, instances, instance_class_counts):
+def make_recommendations(reservations, instances, instance_class_counts, client,
+                         ec2, account_type):
     unreserved_instances = list(instances)
+
+    print()
+    print('Instance class counts --------------------------------------------')
+    for klass in sorted(instance_class_counts, key=instance_class_counts.get,
+                        reverse=True):
+        print(str(instance_class_counts[klass]) + str(klass) + ' ')
 
     print()
     print('Utilized reserved instances --------------------------------------')
     for instance in instances:
-        find_matching_reservartion(instance, instance_class_counts,
-                                   reservations, unreserved_instances)
+        match_reservations(instance, instance_class_counts,
+                           reservations, unreserved_instances)
 
     print()
     print('Unreserved instances ----------------------------------------------')
-    for instance in unreserved_instances:
-        print(instance['InstanceId'],
-              instance['InstanceType'],
-              instance['Placement']['AvailabilityZone'],
-              instance['bj_Platform'],
-              instance_name(instance))
+    writer = csv.writer(open("unreserved_instances.csv", 'w'))
+    for instance in sorted(unreserved_instances, key=lambda x: x['InstanceType']):
+        groups = get_groups(instance)
+        unreserved_instances_out = [
+            instance['InstanceId'],
+            instance['InstanceType'],
+            instance['Placement']['AvailabilityZone'],
+            instance['bj_Platform'],
+            instance_name(instance),
+            'security-groups:' + str(groups),
+            instance.get('VpcId', 'non-vpc'),
+            str(instance)
+        ]
+        print(*unreserved_instances_out)
+        writer.writerow(unreserved_instances_out)
 
     print()
     print('Unused reservations -----------------------------------------------')
+    unused_reservations = []
     for reservation in reservations:
         r_count = reservation['InstanceCount']
-        if reservation['InstanceCount'] > 0:
+        r_used_count = reservation['UsedInstanceCount']
+        diff = r_count - r_used_count
+        if r_used_count != r_count:
+            unused_reservations.append(reservation)
             r_type = reservation['InstanceType']
             r_zone = reservation['AvailabilityZone']
             r_platform = reservation['ProductDescription']
-            print(str((r_type, r_zone, r_platform)) + ' has ' + str(r_count) +
+            print(str((r_type, r_zone, r_platform)) + ' has ' + str(diff) +
                   ' unused instance(s)!')
 
     print()
-    print('Recommended reserved instances ------------------------------------')
-    for instance in unreserved_instances:
-        i_type = instance['InstanceType']
-        zone = instance['Placement']['AvailabilityZone']
-        response = client.describe_images(ImageIds=[instance['ImageId']])
-        image = ec2.Image('ffc81394')
-        offerings = get_offerings(i_type, zone, instance['bj_Platform'])
+    print('Naive recommended reservation changes -----------------------------')
+    az_only_different = []
+    family_and_zone_different = []
+    family_only_different = []
+    for reservation in unused_reservations:
+        for instance in unreserved_instances:
+            have_same_type = same_instance_type(instance, reservation)
+            have_same_platform = same_platform(instance, reservation)
+            have_same_az = same_availability_zone(instance, reservation)
+            have_same_family = same_family(instance, reservation)
+            r_id = reservation['ReservedInstancesId']
+            if have_same_type and have_same_platform and not have_same_az:
+                # Only zone is different
+                az_only_different.append(reservation)
+                print('Change reservation: ' + r_id + ' ZONE CHANGE ONLY -'
+                    ' to availability zone ' +
+                    instance['Placement']['AvailabilityZone'] +
+                    ' to utilize this reservation')
+                # TODO: Change zone, no-brainer, and remove unreserved instance
+            elif have_same_family and not have_same_type and have_same_platform and not have_same_az:
+                family_and_zone_different.append(reservation)
+                print('Change reservation: ' + r_id + ' to availability zone ' +
+                      instance['Placement']['AvailabilityZone'] + ' and instance type from ' +
+                      reservation['InstanceType'] + ' to ' +
+                      instance['InstanceType'] + ' to utilize this reservation')
+                check_reservation_sizing(instance, reservation)
+            elif have_same_family and have_same_platform and have_same_az:
+                # Just need to change type
+                family_only_different.append(reservation)
+                print('Change reservation: ' + r_id + ' instance type from ' +
+                      reservation['InstanceType'] + ' to ' +
+                      instance['InstanceType'] + ' to utilize this reservation')
+                check_reservation_sizing(instance, reservation)
 
-        pass
+            # TODO: When changing instance size in same family, calculate units per: http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ri-modification-instancemove.html
+
+    print()
+    print('Recommended reservation changes ------------------------------------------')
+    type_changes = pack_reservations(unused_reservations, unreserved_instances)
+    for suggestion in type_changes:
+        print('Change reservation ' + suggestion['reservation']['ReservedInstancesId'])
+        print('  current instance type: ' + suggestion['reservation_type'])
+        print('  suggest instance type: ' + suggestion['instance_type'])
+        if suggestion['same_zone']:
+            print('  both already in same zone: ' + suggestion['instance_zone'])
+        else:
+            print('  plus change zone from: ' + suggestion['instance_zone'] +
+                  ' to ' + suggestion['reservation_zone'])
+        print('  new utilization: ' + str(suggestion['utilization']))
+        print('  instances: ')
+        for instance in suggestion['instances']:
+            print('    ' + str(instance_name(instance)) + ' security-groups: ' +
+                  str(get_groups(instance)) + ' ' +
+                  instance.get('VpcId', 'non-vpc'))
+
+    # TODO: See if we can split reservation into two different types
+
+    print()
+    print('Recommended reserved instances ------------------------------------')
+    suggested_reservations = get_suggested_reservations(unreserved_instances,
+                                                        client, account_type)
+    for instance, offerings in suggested_reservations:
+        print('  \nFor instance-id: ' + instance['InstanceId'] + ' ' +
+              str(instance_name(instance)) + ' security-groups: ' +
+              str(get_groups(instance)) + ' ' + instance.get('VpcId', 'non-vpc'))
+        for i, offering in enumerate(offerings):
+            print(str(i) + ') Recommended offering:')
+            print('  instance type:             ' + offering['InstanceType'])
+            if offering['Marketplace']:
+                print('  savings over standard:     ' + str(offering['Savings']))
+                print('  comparable total cost:     ' + str(offering['ComparableTotalCost']))
+                print('  standard total cost:       ' + str(offering['StdTotalCost']))
+                print('  effective hourly:          ' + str(offering['EffectiveHourly']))
+                print('  standard effective hourly: ' + str(offering['StdEffectiveHourly']))
+                print('  comparable upfront:        ' + str(offering['ComparableUpfront']))
+            print('  3rd-party:                 ' + str(offering['Marketplace']))
+            print('  zone:                      ' + offering['AvailabilityZone'])
+            print('  effective hourly:          ' + str(offering['EffectiveHourly']))
+            print('  upfront:                   ' + str(offering['FixedPrice']))
+            print('  total cost:                ' + str(offering['TotalCost']))
+            print('  years:                     ' + str(offering['Hours'] / HOURS_IN_YEAR))
+            print('  id:                        ' + offering['ReservedInstancesOfferingId'])
+            print('  platform                   ' + offering['ProductDescription'])
+            print('  type                       ' + offering['OfferingType'])
+            print('  amazing deal               ' + str(offering.get('AmazingDeal', False)))
+        print('What reservation do you want? Press enter to skip: ')
+        valid = False
+        while not valid:
+            choice = input()
+            if choice.isdigit() or choice == '':
+                valid = True
+        if choice.isdigit():
+            #  Buy reservation
+            reservation = offerings[int(choice)]
+            reservation_id = reservation['ReservedInstancesOfferingId']
+            amount = reservation['FixedPrice']
+            count = 1
+            print('Are you sure you want to buy ' + reservation_id +
+                  ' for $' + str(amount) + '? (y/n) ')
+            confirm = input()
+            if confirm == 'y':
+                try:
+                    purchase_reserved_instance(reservation_id, client, count, amount)
+                except Exception as e:
+                    print('Problem reserving instance, exception below :\n'
+                          + str(e))
+            else:
+                print('Skipping')
+        else:
+            print('Skipping')
 
         # See what reservations are available, especially third-party, that you would need
         # - Allow non-VPC instances to be reserved by VPC reservations?
@@ -90,169 +212,10 @@ def make_recommendations(reservations, instances, instance_class_counts):
     # TODO: Recommend instance reservations that can be changed, make sure you cancel current listings.
 
 
-def find_matching_reservartion(instance, instance_class_counts, reservations,
-                               unreserved_instances):
-    for reservation in reservations:
-        # if reservation matches and not used, mark used and print utilized
-        r_count = reservation['InstanceCount']
-        if r_count != 0:
-            r_type = reservation['InstanceType']
-            r_zone = reservation['AvailabilityZone']
-            r_platform = reservation['ProductDescription']
-            if (r_type, r_zone, r_platform) in instance_class_counts:
-                print(str((r_type, r_zone, r_platform)) +
-                      ' reservation is utilized')
-                reservation['InstanceCount'] -= 1
-                if instance in unreserved_instances:
-                    unreserved_instances.remove(instance)
-                return reservation
-    return None
+def get_groups(instance):
+    groups = [group['GroupName'] for group in instance['SecurityGroups']]
+    return groups
 
-
-def instance_name(instance):
-    if 'Tags' in instance:
-        for tag in instance['Tags']:
-            if tag['Key'] == 'Name':
-                return tag['Value']
-
-
-def get_ris():
-    reserved_instances = client.describe_reserved_instances(
-        #DryRun=True|False,
-        #ReservedInstancesIds=[
-        #    'string',#
-        #],
-        # Filters=[
-        #     {
-        #         'Name': 'string',
-        #         'Values': [
-        #             'string',
-        #         ]
-        #     },
-        # ],
-        #OfferingType='Heavy Utilization'|'Medium Utilization'|'Light Utilization'|'No Upfront'|'Partial Upfront'|'All Upfront'
-    )
-
-    # Get reserved instances that are not retired
-    active_ris = []
-    for reservation in reserved_instances['ReservedInstances']:
-        reservation_state = reservation['State']
-        if reservation_state == 'active':
-            active_ris.append(reservation)
-
-    return active_ris
-
-
-def get_instances(account_type):
-    instances = client.describe_instances(
-        #DryRun=True|False,
-        #InstanceIds=[
-        #    'string',
-        #],
-        #Filters=[
-        #    {
-        #        'Name': 'string',
-        #        'Values': [
-        #            'string',
-        #        ]
-        #    },
-        #],
-        #NextToken='string',
-        #MaxResults=123
-    )
-    running_instances = []
-    instance_class_counts = {}
-    cached_images = {}
-    for instance_data in instances['Reservations']:
-        info = instance_data['Instances']
-        for instance in info:
-            i_type = instance['InstanceType']
-            zone = instance['Placement']['AvailabilityZone']
-            state = instance['State']['Name']
-            if state != 'running':
-                continue
-            platform = get_platform(instance, account_type, cached_images)
-            instance['bj_Platform'] = platform
-            if not platform:
-                continue
-            running_instances.append(instance_data['Instances'][0])
-            instance_class = (i_type, zone, platform)
-            if instance_class in instance_class_counts:
-                instance_class_counts[instance_class] += 1
-            else:
-                instance_class_counts[instance_class] = 1
-    return running_instances, instance_class_counts
-
-
-def get_platform(instance, account_type, cached_images):
-    if 'Platform' in instance:
-        platform = instance['Platform']
-    else:
-        if instance['ImageId'] in cached_images:
-            image = cached_images[instance['ImageId']]
-        else:
-            image = ec2.Image(instance['ImageId'])
-            cached_images[instance['ImageId']] = image
-        image_name = image.name.lower()
-        if 'red' in image_name or 'windows' in image_name or \
-                'suse' in image_name:
-            print('This is unexpected, instance: ' +
-                  instance['InstanceId'] +
-                  ' has image ' + image_name +
-                  ' that may be in a platform that '
-                  'is not Linux/Unix. Skipping instance.')
-            return None
-        else:
-            platform = 'Linux/UNIX'
-
-    # if account_type == ACCOUNT_TYPE_EC2_CLASSIC and 'VpcId' in instance:
-    #     platform += ' (Amazon VPC)'
-
-    return platform
-
-
-def get_offerings(i_type, zone, platform):
-    offerings = client.describe_reserved_instances_offerings(
-        # DryRun=True|False,
-        # ReservedInstancesOfferingIds=[
-        #    'string',
-        # ],
-        InstanceType=i_type,
-        AvailabilityZone=zone,
-        ProductDescription=platform,
-        # Filters=[
-        #    {
-        #        'Name': 'string',
-        #        'Values': [
-        #            'string',
-        #        ]
-        #    },
-        # ],
-        # InstanceTenancy='default'|'dedicated'|'host',
-        # OfferingType='Heavy Utilization'|'Medium Utilization'|'Light Utilization'|'No Upfront'|'Partial Upfront'|'All Upfront',
-        # NextToken='string',
-        MaxResults=1000,
-        IncludeMarketplace=True,
-        # MinDuration=123,
-        # MaxDuration=123,
-        MaxInstanceCount=1000)
-    return offerings
-
-
-def get_default_offerings():
-    offerings = client.describe_reserved_instances_offerings(
-        MaxResults=1000,
-        IncludeMarketplace=True,
-        MaxInstanceCount=1000)
-    return offerings
-
-
-def determine_account_type():
-    default_offerings = get_default_offerings()
-    for offering in default_offerings['ReservedInstancesOfferings']:
-        if 'VPC' in offering['ProductDescription']:
-            return ACCOUNT_TYPE_EC2_CLASSIC
-    return ACCOUNT_TYPE_VPC_DEFAULT
 
 if __name__ == '__main__':
     go()
