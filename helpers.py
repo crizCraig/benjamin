@@ -44,8 +44,9 @@ def same_instance_type(instance, reservation):
 
 
 def same_platform(instance, reservation):
-    return get_account_agnostic_platform(instance['bj_Platform']) == \
-           get_account_agnostic_platform(reservation['ProductDescription'])
+    return get_account_agnostic_platform(instance['bj_Platform']).lower() == \
+           get_account_agnostic_platform(
+               reservation['ProductDescription']).lower()
 
 
 def get_account_agnostic_platform(platform):
@@ -76,7 +77,8 @@ def match_reservations(instance, instance_class_counts, reservations,
             izone = get_availability_zone(instance)
             iid = instance['InstanceId']
             iplatform = get_account_agnostic_platform(instance['bj_Platform'])
-            if itype == rtype and izone == rzone and iplatform == rplatform:
+            if itype == rtype and izone == rzone and \
+                            iplatform.lower() == rplatform.lower():
                 reservation['UsedInstanceCount'] += 1
                 if instance in unreserved_instances:
                     unreserved_instances.remove(instance)
@@ -474,10 +476,8 @@ def get_unused_reservations(reservations):
         r_count = reservation['InstanceCount']
         r_used_count = reservation['UsedInstanceCount']
         diff = r_count - r_used_count
+        reservation['UnusedInstanceCount'] = diff
         if r_used_count != r_count:
             unused_reservations.append(reservation)
-            r_type = reservation['InstanceType']
-            r_zone = reservation['AvailabilityZone']
-            r_platform = reservation['ProductDescription']
-    return diff, r_platform, r_type, r_zone, unused_reservations
+    return unused_reservations
 

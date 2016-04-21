@@ -58,7 +58,8 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
     print()
     print('Unreserved instances ----------------------------------------------')
     writer = csv.writer(open("unreserved_instances.csv", 'w'))
-    for instance in sorted(unreserved_instances, key=lambda x: x['InstanceType']):
+    for instance in sorted(unreserved_instances,
+                           key=lambda x: x['InstanceType']):
         groups = get_groups(instance)
         unreserved_instances_out = [
             instance['InstanceId'],
@@ -67,20 +68,21 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
             instance['bj_Platform'],
             instance_name(instance),
             'security-groups:' + str(groups),
-            instance.get('VpcId', 'non-vpc'),
-            str(instance)
+            instance.get('VpcId', 'non-vpc')
         ]
         print(*unreserved_instances_out)
         writer.writerow(unreserved_instances_out)
 
     print()
     print('Unused reservations -----------------------------------------------')
-    diff, r_platform, r_type, r_zone, unused_reservations = \
-        get_unused_reservations(reservations)
-
+    unused_reservations = get_unused_reservations(reservations)
     for reservation in unused_reservations:
-            print(str((r_type, r_zone, r_platform)) + ' has ' + str(diff) +
-                  ' unused instance(s)!')
+        r_type = reservation['InstanceType']
+        r_zone = reservation['AvailabilityZone']
+        r_platform = reservation['ProductDescription']
+        diff = reservation['UnusedInstanceCount']
+        print(str((r_type, r_zone, r_platform)) + ' has ' + str(diff) +
+              ' unused instance(s)!')
 
     print()
     print('Naive recommended reservation changes -----------------------------')
@@ -116,8 +118,6 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
                       reservation['InstanceType'] + ' to ' +
                       instance['InstanceType'] + ' to utilize this reservation')
                 check_reservation_sizing(instance, reservation)
-
-            # TODO: When changing instance size in same family, calculate units per: http://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ri-modification-instancemove.html
 
     print()
     print('Recommended reservation changes ------------------------------------------')
