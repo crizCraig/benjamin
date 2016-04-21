@@ -77,12 +77,10 @@ def match_reservations(instance, instance_class_counts, reservations,
             iid = instance['InstanceId']
             iplatform = get_account_agnostic_platform(instance['bj_Platform'])
             if itype == rtype and izone == rzone and iplatform == rplatform:
-                print(str((rtype, rzone, rplatform)) +
-                      ' reservation is utilized by instance: ' + iid)
                 reservation['UsedInstanceCount'] += 1
                 if instance in unreserved_instances:
                     unreserved_instances.remove(instance)
-                return reservation
+                return reservation, rtype, rzone, rplatform, iid
     return None
 
 
@@ -468,3 +466,18 @@ def purchase_reserved_instance(offer_id, client, count, amount):
     )
 
     return response
+
+
+def get_unused_reservations(reservations):
+    unused_reservations = []
+    for reservation in reservations:
+        r_count = reservation['InstanceCount']
+        r_used_count = reservation['UsedInstanceCount']
+        diff = r_count - r_used_count
+        if r_used_count != r_count:
+            unused_reservations.append(reservation)
+            r_type = reservation['InstanceType']
+            r_zone = reservation['AvailabilityZone']
+            r_platform = reservation['ProductDescription']
+    return diff, r_platform, r_type, r_zone, unused_reservations
+

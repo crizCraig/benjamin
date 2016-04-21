@@ -45,8 +45,15 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
     print()
     print('Utilized reserved instances --------------------------------------')
     for instance in instances:
-        match_reservations(instance, instance_class_counts,
-                           reservations, unreserved_instances)
+        match = match_reservations(instance, instance_class_counts,
+                                   reservations, unreserved_instances)
+        if match:
+            reservation, rtype, rzone, rplatform, iid = match
+            print(str((rtype, rzone, rplatform)) +
+                  ' reservation is utilized by instance: ' + iid + ' ' +
+                  str(instance_name(instance)) + ' security-groups: ' +
+                  str(get_groups(instance)) + ' ' +
+                  instance.get('VpcId', 'non-vpc'))
 
     print()
     print('Unreserved instances ----------------------------------------------')
@@ -68,16 +75,10 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
 
     print()
     print('Unused reservations -----------------------------------------------')
-    unused_reservations = []
-    for reservation in reservations:
-        r_count = reservation['InstanceCount']
-        r_used_count = reservation['UsedInstanceCount']
-        diff = r_count - r_used_count
-        if r_used_count != r_count:
-            unused_reservations.append(reservation)
-            r_type = reservation['InstanceType']
-            r_zone = reservation['AvailabilityZone']
-            r_platform = reservation['ProductDescription']
+    diff, r_platform, r_type, r_zone, unused_reservations = \
+        get_unused_reservations(reservations)
+
+    for reservation in unused_reservations:
             print(str((r_type, r_zone, r_platform)) + ' has ' + str(diff) +
                   ' unused instance(s)!')
 
