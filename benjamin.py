@@ -214,7 +214,7 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
         # - Notify about EBS encryption ability of c3+, m3+, r3+
         # - Notify about HVM / PV compatibility
         # - Notify about cost effectiveness of later class c4/m4
-        # - Advise changing availibility zone
+        # x Advise changing availibility zone
         # - Advise changing between EC2-VPC and Classic
         # x make sure you select the right type (Linux or Windows)
         # x Check if you are in EC2 classic by seeing if any reserved instance has VPC in its name.
