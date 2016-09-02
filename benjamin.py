@@ -4,6 +4,8 @@ import boto3
 import csv
 import json
 import pprint
+import locale
+locale.setlocale(locale.LC_ALL, 'en_US')
 
 from helpers import *
 
@@ -14,7 +16,7 @@ from helpers import *
 
 # TODO: Search for All-upfront amazing deals - like one cent, or one dollar and buy those.
 
-def go():
+def go(dry_run=True):
     client = boto3.client('ec2', 'us-east-1')
     ec2 = boto3.resource('ec2', 'us-east-1')
 
@@ -29,11 +31,11 @@ def go():
 
     print('getting recommendations...')
     make_recommendations(reservations, instances, instance_class_counts, client,
-                         ec2, account_type)
+                         ec2, account_type, dry_run)
 
 
 def make_recommendations(reservations, instances, instance_class_counts, client,
-                         ec2, account_type):
+                         ec2, account_type, dry_run):
     unreserved_instances = list(instances)
 
     print()
@@ -80,8 +82,9 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
         r_type = reservation['InstanceType']
         r_zone = reservation['AvailabilityZone']
         r_platform = reservation['ProductDescription']
+        r_id = reservation['ReservedInstancesId']
         diff = reservation['UnusedInstanceCount']
-        print(str((r_type, r_zone, r_platform)) + ' has ' + str(diff) +
+        print(str((r_type, r_zone, r_platform, r_id)) + ' has ' + str(diff) +
               ' unused instance(s)!')
 
     print()
@@ -144,15 +147,25 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
     print('Recommended reserved instances ------------------------------------')
     suggested_reservations = get_suggested_reservations(unreserved_instances,
                                                         client, account_type)
+
+    total_upfront = 0
+    total_savings = 0
+    max_years = -1000
     for instance, offerings in suggested_reservations:
         print('  \nFor instance-id: ' + instance['InstanceId'] + ' ' +
               str(instance_name(instance)) + ' security-groups: ' +
               str(get_groups(instance)) + ' ' + instance.get('VpcId', 'non-vpc'))
         for i, offering in enumerate(offerings):
+            upfront = offering['FixedPrice']
+            savings = offering['Savings']
+            years = offering['Hours'] / HOURS_IN_YEAR
+            max_years = max(years, max_years)
+            total_upfront += upfront
+            total_savings += savings
             print(str(i) + ') Recommended offering:')
             print('  instance type:             ' + offering['InstanceType'])
             if offering['Marketplace']:
-                print('  savings over standard:     ' + str(offering['Savings']))
+                print('  savings over standard:     ' + str(savings))
                 print('  comparable total cost:     ' + str(offering['ComparableTotalCost']))
                 print('  standard total cost:       ' + str(offering['StdTotalCost']))
                 print('  effective hourly:          ' + str(offering['EffectiveHourly']))
@@ -161,38 +174,40 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
             print('  3rd-party:                 ' + str(offering['Marketplace']))
             print('  zone:                      ' + offering['AvailabilityZone'])
             print('  effective hourly:          ' + str(offering['EffectiveHourly']))
-            print('  upfront:                   ' + str(offering['FixedPrice']))
+            print('  upfront:                   ' + str(upfront))
             print('  total cost:                ' + str(offering['TotalCost']))
-            print('  years:                     ' + str(offering['Hours'] / HOURS_IN_YEAR))
+            print('  years:                     ' + str(years))
             print('  id:                        ' + offering['ReservedInstancesOfferingId'])
             print('  platform                   ' + offering['ProductDescription'])
             print('  type                       ' + offering['OfferingType'])
             print('  amazing deal               ' + str(offering.get('AmazingDeal', False)))
-        print('What reservation do you want? Press enter to skip: ')
-        valid = False
-        while not valid:
-            choice = input()
-            if choice.isdigit() or choice == '':
-                valid = True
-        if choice.isdigit():
-            #  Buy reservation
-            reservation = offerings[int(choice)]
-            reservation_id = reservation['ReservedInstancesOfferingId']
-            amount = reservation['FixedPrice']
-            count = 1
-            print('Are you sure you want to buy ' + reservation_id +
-                  ' for $' + str(amount) + '? (y/n) ')
-            confirm = input()
-            if confirm == 'y':
-                try:
-                    purchase_reserved_instance(reservation_id, client, count, amount)
-                except Exception as e:
-                    print('Problem reserving instance, exception below :\n'
-                          + str(e))
+
+        if not dry_run:
+            print('What reservation do you want? Press enter to skip: ')
+            valid = False
+            while not valid:
+                choice = input()
+                if choice.isdigit() or choice == '':
+                    valid = True
+            if choice.isdigit():
+                #  Buy reservation
+                reservation = offerings[int(choice)]
+                reservation_id = reservation['ReservedInstancesOfferingId']
+                amount = reservation['FixedPrice']
+                count = 1
+                print('Are you sure you want to buy ' + reservation_id +
+                      ' for $' + str(amount) + '? (y/n) ')
+                confirm = input()
+                if confirm == 'y':
+                    try:
+                        purchase_reserved_instance(reservation_id, client, count, amount)
+                    except Exception as e:
+                        print('Problem reserving instance, exception below :\n'
+                              + str(e))
+                else:
+                    print('Skipping')
             else:
                 print('Skipping')
-        else:
-            print('Skipping')
 
         # See what reservations are available, especially third-party, that you would need
         # - Allow non-VPC instances to be reserved by VPC reservations?
@@ -211,6 +226,9 @@ def make_recommendations(reservations, instances, instance_class_counts, client,
         # Send email asking if you want to purchase the instance with the months left and months to break even.
         # Allow sending email back with number of option you wish to buy
     # TODO: Recommend instance reservations that can be changed, make sure you cancel current listings.
+
+    print()
+    print('Total upfront: ', locale.currency(total_upfront, grouping=True))
 
 
 def get_groups(instance):

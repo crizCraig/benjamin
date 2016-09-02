@@ -371,7 +371,7 @@ def analyze_offerings(offerings):
         std_offer = std_offerings.get((offering['ComparableDuration'],
                                        ofr_type), None)
         if not std_offer:
-            print('Skipping light, medium, heavy 3rd-party offering.')
+            print('Skipping old-style light, medium, heavy 3rd-party offering.')
         else:
             # Return reservations that are less than preferred duration if
             # effective rate and fixed price less and effective upfront price
